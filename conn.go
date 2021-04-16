@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/googollee/go-socket.io/engineio"
 	"github.com/googollee/go-socket.io/parser"
@@ -33,7 +34,7 @@ type writePacket struct {
 
 type namespaces struct {
 	namespaces map[string]*namespaceConn
-	mu sync.RWMutex
+	mu         sync.RWMutex
 }
 
 func newNamespaces() *namespaces {
@@ -82,6 +83,7 @@ type conn struct {
 	errorChan chan error
 	writeChan chan writePacket
 	quitChan  chan struct{}
+	quitCnt   int32
 
 	closeOnce sync.Once
 }
@@ -120,6 +122,12 @@ func (c *conn) Close() error {
 		})
 		err = c.Conn.Close()
 
+		quitCnt := atomic.LoadInt32(&c.quitCnt)
+		for quitCnt > 0 {
+			c.quitChan <- struct{}{}
+			quitCnt--
+		}
+
 		close(c.quitChan)
 	})
 
@@ -136,7 +144,7 @@ func (c *conn) connect() error {
 	c.namespaces.Set(rootNamespace, root)
 
 	root.Join(root.ID())
-	
+
 	c.namespaces.Range(func(ns string, nc *namespaceConn) {
 		nc.SetContext(c.Conn.Context())
 	})
@@ -179,6 +187,7 @@ func (c *conn) write(header parser.Header, args []reflect.Value) {
 		data:   data,
 	}
 
+	atomic.AddInt32(&c.quitCnt, 1)
 	select {
 	case c.writeChan <- pkg:
 	case <-c.quitChan:
@@ -187,6 +196,7 @@ func (c *conn) write(header parser.Header, args []reflect.Value) {
 }
 
 func (c *conn) onError(namespace string, err error) {
+	atomic.AddInt32(&c.quitCnt, 1)
 	select {
 	case c.errorChan <- newErrorMessage(namespace, err):
 	case <-c.quitChan:
@@ -196,6 +206,7 @@ func (c *conn) onError(namespace string, err error) {
 
 func (c *conn) serveError() {
 	defer c.Close()
+	atomic.AddInt32(&c.quitCnt, 1)
 
 	for {
 		select {
@@ -222,6 +233,7 @@ func (c *conn) serveError() {
 
 func (c *conn) serveWrite() {
 	defer c.Close()
+	atomic.AddInt32(&c.quitCnt, 1)
 
 	for {
 		select {
